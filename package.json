@@ -1,0 +1,28 @@
+{
+  "name": "archveil-lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "firebase": "^11.6.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.160.1",
+    "web-ifc": "0.0.39",
+    "web-ifc-three": "^0.0.126"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/three": "^0.160.0",
+    "browserslist": "^4.24.4",
+    "typescript": "5.7.2",
+    "vite": "6.4.2"
+  }
+}
