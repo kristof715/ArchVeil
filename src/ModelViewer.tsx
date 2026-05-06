@@ -13,6 +13,8 @@ type MovementState = {
   left: boolean;
   right: boolean;
   fast: boolean;
+  up: boolean;
+  down: boolean;
 };
 
 const EYE_HEIGHT = 1.7;
@@ -22,6 +24,11 @@ const RUN_MULTIPLIER = 1.8;
 const LOOK_SENSITIVITY = 0.0022;
 const DRAG_LOOK_SENSITIVITY = 0.004;
 const MOVEMENT_DAMPING = 12;
+const DEFAULT_MODEL_RADIUS = 12;
+const VERTICAL_SPEED = 2.6;
+const MAX_STEP_UP = 0.72;
+const MAX_STEP_DOWN = 3.2;
+const GROUND_SNAP_DAMPING = 18;
 
 export function ModelViewer({ project }: { project: ProjectRecord }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -31,6 +38,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
   const [message, setMessage] = useState("Loading IFC model");
   const [xrAvailable, setXrAvailable] = useState(false);
   const [isPointerLocked, setIsPointerLocked] = useState(false);
+  const [cameraMode, setCameraMode] = useState<"walk" | "free">("walk");
+  const cameraModeRef = useRef<"walk" | "free">("walk");
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -42,7 +51,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     setXrAvailable(false);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#e9edf0");
+    scene.background = new THREE.Color("#dfe8ee");
+    scene.fog = new THREE.Fog("#dfe8ee", 45, 180);
 
     const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 2000);
     camera.position.copy(INITIAL_CAMERA);
@@ -51,8 +61,12 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
     renderer.xr.enabled = true;
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mount.appendChild(renderer.domElement);
 
     let vrButton: HTMLElement | null = null;
@@ -73,28 +87,48 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       });
 
     const floor = createFloor();
-    scene.add(floor);
+    const grid = createGroundGrid();
+    const backdrop = createBackdrop();
+    scene.add(floor, grid, backdrop);
 
-    const ambient = new THREE.HemisphereLight("#ffffff", "#8d9aa5", 1.15);
+    const ambient = new THREE.HemisphereLight("#ffffff", "#9aa89c", 1.85);
     scene.add(ambient);
 
-    const sun = new THREE.DirectionalLight("#ffffff", 2.3);
-    sun.position.set(14, 18, 10);
+    const sun = new THREE.DirectionalLight("#fff6e5", 3.4);
+    sun.position.set(22, 34, 18);
     sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 120;
+    sun.shadow.camera.left = -45;
+    sun.shadow.camera.right = 45;
+    sun.shadow.camera.top = 45;
+    sun.shadow.camera.bottom = -45;
     scene.add(sun);
 
-    const movement: MovementState = { forward: false, backward: false, left: false, right: false, fast: false };
+    const fill = new THREE.DirectionalLight("#cfe4ff", 0.95);
+    fill.position.set(-24, 12, -18);
+    scene.add(fill);
+
+    const movement: MovementState = { forward: false, backward: false, left: false, right: false, fast: false, up: false, down: false };
     const pointer = { dragging: false, x: 0, y: 0, yaw: -0.75, pitch: -0.28 };
     const velocity = new THREE.Vector3();
+    const groundRaycaster = new THREE.Raycaster();
+    const rayOrigin = new THREE.Vector3();
     const clock = new THREE.Clock();
     let loadedObject: THREE.Object3D | null = null;
+    let edgeObject: THREE.Object3D | null = null;
+    let modelCenter = new THREE.Vector3();
+    let modelRadius = DEFAULT_MODEL_RADIUS;
 
     function resetCamera() {
-      camera.position.copy(INITIAL_CAMERA);
+      const distance = Math.max(7, modelRadius * 1.25);
+      const x = modelCenter.x + distance;
+      const z = modelCenter.z + distance;
+      const eyeY = cameraModeRef.current === "walk" ? getWalkEyeHeight(x, z, EYE_HEIGHT) : Math.max(EYE_HEIGHT, modelCenter.y + EYE_HEIGHT);
+      camera.position.set(x, eyeY, z);
       velocity.set(0, 0, 0);
-      pointer.yaw = -0.75;
-      pointer.pitch = -0.28;
-      updateCameraRotation();
+      lookAtPoint(new THREE.Vector3(modelCenter.x, eyeY, modelCenter.z));
     }
     resetRef.current = resetCamera;
 
@@ -103,6 +137,14 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       camera.rotation.y = pointer.yaw;
       camera.rotation.x = pointer.pitch;
     }
+
+    function lookAtPoint(target: THREE.Vector3) {
+      const offset = target.clone().sub(camera.position);
+      pointer.yaw = Math.atan2(-offset.x, -offset.z);
+      pointer.pitch = Math.atan2(offset.y, Math.hypot(offset.x, offset.z));
+      updateCameraRotation();
+    }
+
     updateCameraRotation();
 
     function resize() {
@@ -121,7 +163,18 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       if (key === "a" || key === "arrowleft") movement.left = pressed;
       if (key === "d" || key === "arrowright") movement.right = pressed;
       if (key === "shift") movement.fast = pressed;
-      if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "shift"].includes(key)) {
+      if (key === " " || key === "space" || key === "e") movement.up = pressed;
+      if (key === "c" || key === "q" || key === "control") movement.down = pressed;
+      if (key === "f" && pressed && !event.repeat) {
+        const nextMode = cameraModeRef.current === "walk" ? "free" : "walk";
+        cameraModeRef.current = nextMode;
+        setCameraMode(nextMode);
+        velocity.set(0, 0, 0);
+        if (nextMode === "walk") {
+          camera.position.y = getWalkEyeHeight(camera.position.x, camera.position.z, camera.position.y);
+        }
+      }
+      if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "shift", " ", "space", "e", "c", "q", "control", "f"].includes(key)) {
         event.preventDefault();
       }
     }
@@ -165,13 +218,17 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       direction.y = 0;
       direction.normalize();
       camera.position.addScaledVector(direction, -Math.sign(event.deltaY) * 0.8);
-      camera.position.y = EYE_HEIGHT;
+      if (cameraModeRef.current === "walk") {
+        camera.position.y = getWalkEyeHeight(camera.position.x, camera.position.z, camera.position.y);
+      }
     }
 
     function updateMovement(delta: number) {
       const forward = new THREE.Vector3();
       camera.getWorldDirection(forward);
-      forward.y = 0;
+      if (cameraModeRef.current === "walk") {
+        forward.y = 0;
+      }
       forward.normalize();
 
       const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
@@ -186,10 +243,35 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         input.normalize().multiplyScalar(targetSpeed);
       }
 
+      if (cameraModeRef.current === "free") {
+        if (movement.up) input.y += VERTICAL_SPEED;
+        if (movement.down) input.y -= VERTICAL_SPEED;
+      }
+
       const blend = 1 - Math.exp(-MOVEMENT_DAMPING * delta);
       velocity.lerp(input, blend);
       camera.position.addScaledVector(velocity, delta);
-      camera.position.y = EYE_HEIGHT;
+
+      if (cameraModeRef.current === "walk") {
+        const targetEyeHeight = getWalkEyeHeight(camera.position.x, camera.position.z, camera.position.y);
+        const snap = 1 - Math.exp(-GROUND_SNAP_DAMPING * delta);
+        camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetEyeHeight, snap);
+      }
+    }
+
+    function getWalkEyeHeight(x: number, z: number, fallbackEyeY: number) {
+      if (!loadedObject) return EYE_HEIGHT;
+      const currentGroundY = fallbackEyeY - EYE_HEIGHT;
+      rayOrigin.set(x, fallbackEyeY + MAX_STEP_UP, z);
+      groundRaycaster.set(rayOrigin, new THREE.Vector3(0, -1, 0));
+      groundRaycaster.far = EYE_HEIGHT + MAX_STEP_UP + MAX_STEP_DOWN;
+      const hits = groundRaycaster.intersectObject(loadedObject, true);
+      const hit = hits.find((candidate) => {
+        const groundDelta = candidate.point.y - currentGroundY;
+        return groundDelta <= MAX_STEP_UP && groundDelta >= -MAX_STEP_DOWN;
+      });
+      if (!hit) return Math.max(EYE_HEIGHT, fallbackEyeY);
+      return Math.max(EYE_HEIGHT, hit.point.y + EYE_HEIGHT);
     }
 
     function onPointerLockChange() {
@@ -221,8 +303,12 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
 
         if (disposed) return;
         loadedObject = object;
-        normalizeModel(object);
+        const placement = normalizeModel(object);
+        modelCenter = placement.center;
+        modelRadius = placement.radius;
+        enhanceModelAppearance(object);
         scene.add(object);
+        resetCamera();
         setStatus("ready");
         setMessage("Model ready");
       } catch (loadError) {
@@ -230,7 +316,12 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         console.error(loadError);
         const demo = createFallbackBuilding();
         loadedObject = demo;
-        scene.add(demo);
+        const placement = normalizeModel(demo);
+        modelCenter = placement.center;
+        modelRadius = placement.radius;
+        edgeObject = createModelEdges(demo);
+        scene.add(demo, edgeObject);
+        resetCamera();
         setStatus("error");
         const detail = loadError instanceof Error ? ` ${loadError.message}` : "";
         setMessage(`The IFC file could not be parsed here.${detail} A walkthrough preview scene is shown instead.`);
@@ -238,19 +329,75 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     }
 
     function normalizeModel(object: THREE.Object3D) {
+      const originalBox = new THREE.Box3().setFromObject(object);
+      const originalSize = new THREE.Vector3();
+      const originalCenter = new THREE.Vector3();
+      originalBox.getSize(originalSize);
+      originalBox.getCenter(originalCenter);
+
+      object.position.sub(originalCenter);
+      object.position.y += originalSize.y / 2;
+
+      const maxAxis = Math.max(originalSize.x, originalSize.y, originalSize.z);
+      if (maxAxis > 70) {
+        object.scale.multiplyScalar(70 / maxAxis);
+      }
+
       const box = new THREE.Box3().setFromObject(object);
       const size = new THREE.Vector3();
       const center = new THREE.Vector3();
       box.getSize(size);
       box.getCenter(center);
+      return { center, radius: Math.max(size.x, size.z) / 2 };
+    }
 
-      object.position.sub(center);
-      object.position.y += size.y / 2;
+    function enhanceModelAppearance(object: THREE.Object3D) {
+      object.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
 
-      const maxAxis = Math.max(size.x, size.y, size.z);
-      if (maxAxis > 70) {
-        object.scale.multiplyScalar(70 / maxAxis);
-      }
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+
+        const sourceMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        const upgraded = sourceMaterials.map((material) => {
+          const existing = material as THREE.Material & { color?: THREE.Color; opacity?: number; transparent?: boolean };
+          const color = existing.color?.clone() ?? new THREE.Color("#d8d2c5");
+          const sourceOpacity = existing.opacity ?? 1;
+          const hasExplicitAlpha = existing.transparent || sourceOpacity < 0.98;
+          const isBlueGlass = color.b > 0.45 && color.b > color.r * 1.12 && color.g > 0.32;
+          const isGlassLike = hasExplicitAlpha && isBlueGlass;
+
+          return new THREE.MeshStandardMaterial({
+            color,
+            roughness: isGlassLike ? 0.12 : 0.78,
+            metalness: 0.01,
+            transparent: isGlassLike,
+            opacity: isGlassLike ? Math.min(Math.max(sourceOpacity, 0.34), 0.55) : 1,
+            depthWrite: !isGlassLike,
+            depthTest: true,
+            side: isGlassLike ? THREE.DoubleSide : THREE.FrontSide
+          });
+        });
+
+        mesh.material = Array.isArray(mesh.material) ? upgraded : upgraded[0];
+      });
+    }
+
+    function createModelEdges(object: THREE.Object3D) {
+      const group = new THREE.Group();
+      object.updateWorldMatrix(true, true);
+      object.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.geometry) return;
+        const edges = new THREE.LineSegments(
+          new THREE.EdgesGeometry(mesh.geometry, 38),
+          new THREE.LineBasicMaterial({ color: "#2a2d2f", transparent: true, opacity: 0.06 })
+        );
+        edges.applyMatrix4(mesh.matrixWorld);
+        group.add(edges);
+      });
+      return group;
     }
 
     const onKeyDown = (event: KeyboardEvent) => updateKeyState(event, true);
@@ -284,6 +431,15 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("wheel", onWheel);
+      edgeObject?.traverse((child) => {
+        const line = child as THREE.LineSegments;
+        line.geometry?.dispose();
+        if (Array.isArray(line.material)) {
+          line.material.forEach((material) => material.dispose());
+        } else {
+          line.material?.dispose();
+        }
+      });
       loadedObject?.traverse((child) => {
         const mesh = child as THREE.Mesh;
         mesh.geometry?.dispose();
@@ -295,6 +451,10 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       });
       floor.geometry.dispose();
       (floor.material as THREE.Material).dispose();
+      grid.geometry.dispose();
+      (grid.material as THREE.Material).dispose();
+      backdrop.geometry.dispose();
+      (backdrop.material as THREE.Material).dispose();
       renderer.dispose();
       vrButton?.remove();
       renderer.domElement.remove();
@@ -308,7 +468,11 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
 
   return (
     <div className="viewer-stage">
-      <div ref={mountRef} className="canvas-mount" aria-label="3D building viewer" />
+      <div
+        ref={mountRef}
+        className={`canvas-mount ${isPointerLocked ? "pointer-locked" : ""}`}
+        aria-label="3D building viewer"
+      />
 
       <div className="viewer-controls">
         <button className="icon-text-button" onClick={() => resetRef.current?.()}>
@@ -317,7 +481,9 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         </button>
         <div className={`control-hint ${isPointerLocked ? "control-hint-active" : ""}`}>
           <ScanSearch size={18} aria-hidden="true" />
-          {isPointerLocked ? "Mouse look active. Esc releases." : "Click viewer, then WASD to walk. Shift runs."}
+          {isPointerLocked
+            ? `${cameraMode === "free" ? "Free camera" : "Walk mode"}. Esc releases.`
+            : cameraMode === "free" ? "Free: WASD, Space/E up, C/Q down, F walk." : "Walk: WASD, Shift run, stairs auto-climb, F free camera."}
         </div>
       </div>
 
@@ -331,12 +497,29 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
 }
 
 function createFloor() {
-  const geometry = new THREE.PlaneGeometry(180, 180);
-  const material = new THREE.MeshStandardMaterial({ color: "#d6d9d2", roughness: 0.95 });
+  const geometry = new THREE.PlaneGeometry(220, 220);
+  const material = new THREE.MeshStandardMaterial({ color: "#cfd6c9", roughness: 0.92 });
   const floor = new THREE.Mesh(geometry, material);
   floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
   return floor;
+}
+
+function createGroundGrid() {
+  const grid = new THREE.GridHelper(220, 88, "#8f9c91", "#c0c9bd");
+  grid.position.y = 0.012;
+  const material = grid.material as THREE.Material;
+  material.transparent = true;
+  material.opacity = 0.34;
+  return grid;
+}
+
+function createBackdrop() {
+  const geometry = new THREE.PlaneGeometry(220, 70);
+  const material = new THREE.MeshBasicMaterial({ color: "#d9e2e8", transparent: true, opacity: 0.72 });
+  const backdrop = new THREE.Mesh(geometry, material);
+  backdrop.position.set(0, 35, -72);
+  return backdrop;
 }
 
 function createFallbackBuilding() {

@@ -329,7 +329,7 @@ h2 {
   touch-action: none;
 }
 
-.canvas-mount canvas:focus {
+.canvas-mount.pointer-locked canvas {
   cursor: none;
 }
 

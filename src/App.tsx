@@ -100,7 +100,7 @@ function UploadPage() {
       <div className="brand-row">
         <div className="brand-mark">AV</div>
         <div>
-          <p className="eyebrow">ArchVeil Lite</p>
+          <p className="eyebrow">ArchVeil</p>
           <h1>Browser-based 3D building walkthroughs</h1>
         </div>
       </div>
@@ -221,7 +221,7 @@ function ViewerPage({ projectId }: { projectId: string }) {
           <Home size={20} aria-hidden="true" />
         </button>
         <div>
-          <p className="eyebrow">ArchVeil Lite</p>
+          <p className="eyebrow">ArchVeil</p>
           <h1>{project?.name ?? "Loading project"}</h1>
         </div>
         <span className="mode-pill">{storageAdapter.mode === "firebase" ? "Firebase" : "Local demo"}</span>
