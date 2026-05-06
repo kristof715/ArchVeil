@@ -29,6 +29,8 @@ const VERTICAL_SPEED = 2.6;
 const MAX_STEP_UP = 0.72;
 const MAX_STEP_DOWN = 3.2;
 const GROUND_SNAP_DAMPING = 18;
+const GLASS_NAME_PATTERN = /glass|glaz|window|pane|transparent|curtain/i;
+const HIDDEN_FILL_NAME_PATTERN = /interior fill|air layers?|air space/i;
 
 export function ModelViewer({ project }: { project: ProjectRecord }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -356,27 +358,54 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         const mesh = child as THREE.Mesh;
         if (!mesh.isMesh) return;
 
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
 
         const sourceMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         const upgraded = sourceMaterials.map((material) => {
           const existing = material as THREE.Material & { color?: THREE.Color; opacity?: number; transparent?: boolean };
+          const materialName = existing.name ?? "";
           const color = existing.color?.clone() ?? new THREE.Color("#d8d2c5");
           const sourceOpacity = existing.opacity ?? 1;
           const hasExplicitAlpha = existing.transparent || sourceOpacity < 0.98;
-          const isBlueGlass = color.b > 0.45 && color.b > color.r * 1.12 && color.g > 0.32;
-          const isGlassLike = hasExplicitAlpha && isBlueGlass;
+          const isHiddenFill = HIDDEN_FILL_NAME_PATTERN.test(materialName);
+          const isNamedGlass = GLASS_NAME_PATTERN.test(materialName);
+          const isBlueGlass = color.b > 0.24 && color.b > color.r * 1.04 && color.b > color.g * 0.82;
+          const isPaleGlass = color.b > 0.55 && color.g > 0.52 && color.r > 0.45 && Math.abs(color.b - color.g) < 0.22;
+          const isGlassLike = isNamedGlass || isBlueGlass || (hasExplicitAlpha && isPaleGlass);
+
+          if (isHiddenFill) {
+            return new THREE.MeshBasicMaterial({
+              visible: false,
+              depthWrite: false,
+              depthTest: false
+            });
+          }
+
+          if (isGlassLike) {
+            return new THREE.MeshBasicMaterial({
+              color: "#dff8ff",
+              transparent: true,
+              opacity: 0.08,
+              depthWrite: false,
+              depthTest: true,
+              blending: THREE.NormalBlending,
+              side: THREE.DoubleSide
+            });
+          }
 
           return new THREE.MeshStandardMaterial({
             color,
-            roughness: isGlassLike ? 0.12 : 0.78,
+            roughness: 0.78,
             metalness: 0.01,
-            transparent: isGlassLike,
-            opacity: isGlassLike ? Math.min(Math.max(sourceOpacity, 0.34), 0.55) : 1,
-            depthWrite: !isGlassLike,
+            transparent: false,
+            opacity: 1,
+            depthWrite: true,
             depthTest: true,
-            side: isGlassLike ? THREE.DoubleSide : THREE.FrontSide
+            side: THREE.FrontSide,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
           });
         });
 
@@ -525,12 +554,12 @@ function createBackdrop() {
 function createFallbackBuilding() {
   const group = new THREE.Group();
   const wallMaterial = new THREE.MeshStandardMaterial({ color: "#d9d6cc", roughness: 0.88 });
-  const glassMaterial = new THREE.MeshStandardMaterial({
-    color: "#6f9fb4",
-    roughness: 0.25,
-    metalness: 0.05,
+  const glassMaterial = new THREE.MeshBasicMaterial({
+    color: "#dff8ff",
     transparent: true,
-    opacity: 0.72
+    opacity: 0.18,
+    depthWrite: false,
+    side: THREE.DoubleSide
   });
   const slabMaterial = new THREE.MeshStandardMaterial({ color: "#85837a", roughness: 0.8 });
 
@@ -541,11 +570,20 @@ function createFallbackBuilding() {
     slab.receiveShadow = true;
     group.add(slab);
 
-    const shell = new THREE.Mesh(new THREE.BoxGeometry(15, 2.5, 10), wallMaterial);
-    shell.position.y = level * 3 + 1.4;
-    shell.castShadow = true;
-    shell.receiveShadow = true;
-    group.add(shell);
+    const sideWallWidth = 0.7;
+    const wallHeight = 2.5;
+    const wallY = level * 3 + 1.4;
+    const leftWall = new THREE.Mesh(new THREE.BoxGeometry(sideWallWidth, wallHeight, 10), wallMaterial);
+    leftWall.position.set(-7.15, wallY, 0);
+    const rightWall = new THREE.Mesh(new THREE.BoxGeometry(sideWallWidth, wallHeight, 10), wallMaterial);
+    rightWall.position.set(7.15, wallY, 0);
+    const rearWall = new THREE.Mesh(new THREE.BoxGeometry(15, wallHeight, 0.24), wallMaterial);
+    rearWall.position.set(0, wallY, 5);
+    [leftWall, rightWall, rearWall].forEach((wall) => {
+      wall.castShadow = true;
+      wall.receiveShadow = true;
+      group.add(wall);
+    });
 
     const glass = new THREE.Mesh(new THREE.BoxGeometry(15.1, 1.3, 0.08), glassMaterial);
     glass.position.set(0, level * 3 + 1.7, -5.05);

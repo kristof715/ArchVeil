@@ -1,6 +1,8 @@
 node_modules
 dist
+test-ifc
 .DS_Store
 .env
 .env.local
 .vite
+.codex
