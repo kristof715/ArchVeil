@@ -20,6 +20,10 @@ npm run dev -- --port 5173
 
 Open `http://localhost:5173/`.
 
+## Test files
+
+https://github.com/youshengCode/IfcSampleFiles/blob/main/Ifc2x3_Duplex_Architecture.ifc
+
 ## Firebase Configuration
 
 Copy `.env.example` to `.env` and fill in:

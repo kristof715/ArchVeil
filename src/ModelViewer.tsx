@@ -29,7 +29,7 @@ const VERTICAL_SPEED = 2.6;
 const MAX_STEP_UP = 0.72;
 const MAX_STEP_DOWN = 3.2;
 const GROUND_SNAP_DAMPING = 18;
-const GLASS_NAME_PATTERN = /glass|glaz|window|pane|transparent|curtain/i;
+const GLASS_NAME_PATTERN = /(^|[\s:_-])(glass|glaz(?:ed|ing)?|pane|transparent)([\s:_-]|$)/i;
 const HIDDEN_FILL_NAME_PATTERN = /interior fill|air layers?|air space/i;
 
 export function ModelViewer({ project }: { project: ProjectRecord }) {
@@ -370,9 +370,9 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
           const hasExplicitAlpha = existing.transparent || sourceOpacity < 0.98;
           const isHiddenFill = HIDDEN_FILL_NAME_PATTERN.test(materialName);
           const isNamedGlass = GLASS_NAME_PATTERN.test(materialName);
-          const isBlueGlass = color.b > 0.24 && color.b > color.r * 1.04 && color.b > color.g * 0.82;
-          const isPaleGlass = color.b > 0.55 && color.g > 0.52 && color.r > 0.45 && Math.abs(color.b - color.g) < 0.22;
-          const isGlassLike = isNamedGlass || isBlueGlass || (hasExplicitAlpha && isPaleGlass);
+          const isBlueTransparent = hasExplicitAlpha && color.b > 0.24 && color.b > color.r * 1.04 && color.b > color.g * 0.82;
+          const isPaleTransparent = hasExplicitAlpha && color.b > 0.55 && color.g > 0.52 && color.r > 0.45 && Math.abs(color.b - color.g) < 0.22;
+          const isGlassLike = isNamedGlass || isBlueTransparent || isPaleTransparent;
 
           if (isHiddenFill) {
             return new THREE.MeshBasicMaterial({
@@ -384,12 +384,13 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
 
           if (isGlassLike) {
             return new THREE.MeshBasicMaterial({
-              color: "#dff8ff",
+              color: "#a8c4cf",
               transparent: true,
               opacity: 0.08,
               depthWrite: false,
               depthTest: true,
               blending: THREE.NormalBlending,
+              forceSinglePass: true,
               side: THREE.DoubleSide
             });
           }
