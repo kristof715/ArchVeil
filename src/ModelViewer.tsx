@@ -125,6 +125,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
 
     function resetCamera() {
       const distance = Math.max(7, modelRadius * 1.25);
+      camera.far = Math.max(2000, distance * 6);
+      camera.updateProjectionMatrix();
       const x = modelCenter.x + distance;
       const z = modelCenter.z + distance;
       const eyeY = cameraModeRef.current === "walk" ? getWalkEyeHeight(x, z, EYE_HEIGHT) : Math.max(EYE_HEIGHT, modelCenter.y + EYE_HEIGHT);
@@ -339,11 +341,6 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
 
       object.position.sub(originalCenter);
       object.position.y += originalSize.y / 2;
-
-      const maxAxis = Math.max(originalSize.x, originalSize.y, originalSize.z);
-      if (maxAxis > 70) {
-        object.scale.multiplyScalar(70 / maxAxis);
-      }
 
       const box = new THREE.Box3().setFromObject(object);
       const size = new THREE.Vector3();
