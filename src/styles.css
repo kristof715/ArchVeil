@@ -345,6 +345,7 @@ h2 {
 }
 
 .control-hint,
+.xr-chip,
 .viewer-status {
   display: inline-flex;
   align-items: center;
@@ -376,6 +377,16 @@ h2 {
 .control-hint-active {
   border-color: rgba(47, 191, 113, 0.52);
   background: rgba(28, 83, 62, 0.82);
+}
+
+.xr-chip {
+  background: rgba(17, 52, 67, 0.8);
+  border-color: rgba(127, 180, 202, 0.42);
+}
+
+.xr-chip-active {
+  background: rgba(28, 83, 62, 0.86);
+  border-color: rgba(47, 191, 113, 0.56);
 }
 
 .status-error {

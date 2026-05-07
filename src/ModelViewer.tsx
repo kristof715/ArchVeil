@@ -1,7 +1,8 @@
-import { RotateCcw, ScanSearch, TriangleAlert } from "lucide-react";
+import { RotateCcw, ScanSearch, TriangleAlert, View } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
+import { XRControllerModelFactory } from "three/examples/jsm/webxr/XRControllerModelFactory.js";
 import type { IFCLoader } from "web-ifc-three/IFCLoader";
 import type { ProjectRecord } from "./types";
 
@@ -26,6 +27,12 @@ const DRAG_LOOK_SENSITIVITY = 0.004;
 const MOVEMENT_DAMPING = 12;
 const DEFAULT_MODEL_RADIUS = 12;
 const VERTICAL_SPEED = 2.6;
+const XR_WALK_SPEED = 2.2;
+const XR_FAST_MULTIPLIER = 1.75;
+const XR_TURN_STEP = Math.PI / 8;
+const XR_TURN_DEBOUNCE = 0.32;
+const XR_TELEPORT_MAX_DISTANCE = 24;
+const XR_THUMBSTICK_DEADZONE = 0.18;
 const MAX_STEP_UP = 0.72;
 const MAX_STEP_DOWN = 3.2;
 const GROUND_SNAP_DAMPING = 18;
@@ -39,6 +46,7 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
   const [status, setStatus] = useState<ViewerStatus>("loading");
   const [message, setMessage] = useState("Loading IFC model");
   const [xrAvailable, setXrAvailable] = useState(false);
+  const [isXrPresenting, setIsXrPresenting] = useState(false);
   const [isPointerLocked, setIsPointerLocked] = useState(false);
   const [cameraMode, setCameraMode] = useState<"walk" | "free">("walk");
   const cameraModeRef = useRef<"walk" | "free">("walk");
@@ -59,6 +67,10 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 2000);
     camera.position.copy(INITIAL_CAMERA);
     camera.lookAt(0, 1.8, 0);
+    const xrOrigin = new THREE.Group();
+    xrOrigin.name = "XR user origin";
+    xrOrigin.add(camera);
+    scene.add(xrOrigin);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -88,6 +100,38 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         if (!disposed) setXrAvailable(false);
       });
 
+    function onXrSessionStart() {
+      if (document.pointerLockElement === renderer.domElement) {
+        document.exitPointerLock();
+      }
+      setIsPointerLocked(false);
+      setIsXrPresenting(true);
+      cameraModeRef.current = "walk";
+      setCameraMode("walk");
+      velocity.set(0, 0, 0);
+      xrVelocity.set(0, 0, 0);
+      xrTeleportMarker.visible = false;
+      clock.getDelta();
+    }
+
+    function onXrSessionEnd() {
+      camera.getWorldPosition(cameraWorldPosition);
+      camera.getWorldQuaternion(cameraWorldQuaternion);
+      xrOrigin.position.set(0, 0, 0);
+      xrOrigin.rotation.set(0, 0, 0);
+      camera.position.copy(cameraWorldPosition);
+      camera.quaternion.copy(cameraWorldQuaternion);
+      camera.rotation.order = "YXZ";
+      pointer.yaw = camera.rotation.y;
+      pointer.pitch = camera.rotation.x;
+      xrVelocity.set(0, 0, 0);
+      xrTeleportMarker.visible = false;
+      setIsXrPresenting(false);
+    }
+
+    renderer.xr.addEventListener("sessionstart", onXrSessionStart);
+    renderer.xr.addEventListener("sessionend", onXrSessionEnd);
+
     const floor = createFloor();
     const grid = createGroundGrid();
     const backdrop = createBackdrop();
@@ -115,15 +159,97 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     const movement: MovementState = { forward: false, backward: false, left: false, right: false, fast: false, up: false, down: false };
     const pointer = { dragging: false, x: 0, y: 0, yaw: -0.75, pitch: -0.28 };
     const velocity = new THREE.Vector3();
+    const xrVelocity = new THREE.Vector3();
     const groundRaycaster = new THREE.Raycaster();
     const rayOrigin = new THREE.Vector3();
+    const xrRaycaster = new THREE.Raycaster();
+    const xrRayOrigin = new THREE.Vector3();
+    const xrRayDirection = new THREE.Vector3();
+    const cameraWorldPosition = new THREE.Vector3();
+    const cameraWorldDirection = new THREE.Vector3();
+    const cameraWorldQuaternion = new THREE.Quaternion();
+    const xrForward = new THREE.Vector3();
+    const xrRight = new THREE.Vector3();
+    const xrMoveInput = new THREE.Vector3();
+    const xrTeleportTarget = new THREE.Vector3();
     const clock = new THREE.Clock();
+    const xrTurnTimers: Record<string, number> = { left: 0, right: 0, none: 0 };
     let loadedObject: THREE.Object3D | null = null;
     let edgeObject: THREE.Object3D | null = null;
     let modelCenter = new THREE.Vector3();
     let modelRadius = DEFAULT_MODEL_RADIUS;
+    const controllerModelFactory = new XRControllerModelFactory();
+    const xrControllers = [0, 1].map((index) => createXrController(index));
+    const xrTeleportMarker = createTeleportMarker();
+    scene.add(xrTeleportMarker);
+
+    function createXrController(index: number) {
+      const controller = renderer.xr.getController(index);
+      const grip = renderer.xr.getControllerGrip(index);
+      const ray = createControllerRay();
+      controller.add(ray);
+      grip.add(controllerModelFactory.createControllerModel(grip));
+
+      controller.userData.index = index;
+      controller.userData.inputSource = null;
+      controller.userData.teleportPressed = false;
+
+      controller.addEventListener("connected", (event) => {
+        controller.userData.inputSource = (event as unknown as { data: XRInputSource }).data;
+        ray.visible = true;
+      });
+      controller.addEventListener("disconnected", () => {
+        controller.userData.inputSource = null;
+        ray.visible = false;
+      });
+      controller.addEventListener("selectstart", () => {
+        controller.userData.teleportPressed = true;
+      });
+      controller.addEventListener("selectend", () => {
+        if (controller.userData.teleportPressed && xrTeleportMarker.visible) {
+          teleportXrUser(xrTeleportMarker.position);
+        }
+        controller.userData.teleportPressed = false;
+        xrTeleportMarker.visible = false;
+      });
+
+      xrOrigin.add(controller, grip);
+      return { controller, grip, ray };
+    }
+
+    function createControllerRay() {
+      const geometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -1)
+      ]);
+      const material = new THREE.LineBasicMaterial({ color: "#dff8ff", transparent: true, opacity: 0.72 });
+      const line = new THREE.Line(geometry, material);
+      line.name = "XR pointer ray";
+      line.scale.z = 4;
+      line.visible = false;
+      return line;
+    }
+
+    function createTeleportMarker() {
+      const geometry = new THREE.RingGeometry(0.22, 0.34, 36);
+      const material = new THREE.MeshBasicMaterial({
+        color: "#2fbf71",
+        transparent: true,
+        opacity: 0.72,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+      const marker = new THREE.Mesh(geometry, material);
+      marker.name = "XR teleport marker";
+      marker.rotation.x = -Math.PI / 2;
+      marker.position.y = 0.018;
+      marker.visible = false;
+      return marker;
+    }
 
     function resetCamera() {
+      xrOrigin.position.set(0, 0, 0);
+      xrOrigin.rotation.set(0, 0, 0);
       const distance = Math.max(7, modelRadius * 1.25);
       camera.far = Math.max(2000, distance * 6);
       camera.updateProjectionMatrix();
@@ -228,6 +354,11 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     }
 
     function updateMovement(delta: number) {
+      if (renderer.xr.isPresenting) {
+        updateXrMovement(delta);
+        return;
+      }
+
       const forward = new THREE.Vector3();
       camera.getWorldDirection(forward);
       if (cameraModeRef.current === "walk") {
@@ -261,6 +392,142 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         const snap = 1 - Math.exp(-GROUND_SNAP_DAMPING * delta);
         camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetEyeHeight, snap);
       }
+    }
+
+    function updateXrMovement(delta: number) {
+      xrMoveInput.set(0, 0, 0);
+      let fast = false;
+      let teleportController: THREE.Group | null = null;
+      const session = renderer.xr.getSession();
+      const inputSources = Array.from(session?.inputSources ?? []);
+
+      xrControllers.forEach(({ controller }, index) => {
+        const cachedInputSource = controller.userData.inputSource as XRInputSource | null;
+        const inputSource =
+          cachedInputSource ??
+          inputSources.find((source) => source.handedness === (index === 0 ? "left" : "right")) ??
+          inputSources[index] ??
+          null;
+        const gamepad = inputSource?.gamepad;
+        const handKey = inputSource?.handedness ?? "none";
+        xrTurnTimers[handKey] = Math.max(0, (xrTurnTimers[handKey] ?? 0) - delta);
+
+        if (gamepad) {
+          const { x: axisX, y: axisY } = getXrThumbstickAxes(gamepad);
+          const isMoveController = handKey === "left" || inputSources.length === 1;
+          const isTurnController = handKey === "right" || inputSources.length === 1;
+
+          if (isMoveController) {
+            if (Math.abs(axisY) > XR_THUMBSTICK_DEADZONE) {
+              xrMoveInput.z -= axisY;
+            }
+            if (Math.abs(axisX) > XR_THUMBSTICK_DEADZONE) {
+              xrMoveInput.x += axisX;
+            }
+          }
+
+          if (isTurnController && Math.abs(axisX) > 0.82 && Math.abs(axisY) < 0.35 && (xrTurnTimers[handKey] ?? 0) === 0) {
+            rotateXrOriginAroundHeadset(axisX > 0 ? -XR_TURN_STEP : XR_TURN_STEP);
+            xrTurnTimers[handKey] = XR_TURN_DEBOUNCE;
+          }
+
+          fast = fast || gamepad.buttons.some((button, buttonIndex) => buttonIndex > 0 && button.pressed);
+        }
+
+        if (controller.userData.teleportPressed) {
+          teleportController = controller;
+        }
+      });
+
+      if (xrMoveInput.lengthSq() > 0) {
+        camera.getWorldDirection(xrForward);
+        xrForward.y = 0;
+        xrForward.normalize();
+        xrRight.crossVectors(xrForward, camera.up).normalize();
+
+        const targetSpeed = XR_WALK_SPEED * (fast ? XR_FAST_MULTIPLIER : 1);
+        xrVelocity
+          .copy(xrForward)
+          .multiplyScalar(xrMoveInput.z)
+          .addScaledVector(xrRight, xrMoveInput.x)
+          .normalize()
+          .multiplyScalar(targetSpeed);
+      } else {
+        xrVelocity.set(0, 0, 0);
+      }
+
+      xrOrigin.position.addScaledVector(xrVelocity, delta);
+
+      if (cameraModeRef.current === "walk") {
+        camera.getWorldPosition(cameraWorldPosition);
+        const targetEyeHeight = getWalkEyeHeight(cameraWorldPosition.x, cameraWorldPosition.z, cameraWorldPosition.y);
+        const snap = 1 - Math.exp(-GROUND_SNAP_DAMPING * delta);
+        xrOrigin.position.y += (targetEyeHeight - cameraWorldPosition.y) * snap;
+      }
+
+      updateXrTeleportMarker(teleportController);
+    }
+
+    function getXrThumbstickAxes(gamepad: Gamepad) {
+      const axes = gamepad.axes.map((axis) => (Math.abs(axis) > XR_THUMBSTICK_DEADZONE ? axis : 0));
+      const pairs = [
+        { x: axes[2] ?? 0, y: axes[3] ?? 0 },
+        { x: axes[0] ?? 0, y: axes[1] ?? 0 },
+        { x: axes[4] ?? 0, y: axes[5] ?? 0 }
+      ];
+      return pairs.reduce((strongest, pair) => {
+        const strongestMagnitude = Math.hypot(strongest.x, strongest.y);
+        const pairMagnitude = Math.hypot(pair.x, pair.y);
+        return pairMagnitude > strongestMagnitude ? pair : strongest;
+      }, pairs[0]);
+    }
+
+    function rotateXrOriginAroundHeadset(angle: number) {
+      camera.getWorldPosition(cameraWorldPosition);
+      xrOrigin.position.sub(cameraWorldPosition);
+      xrOrigin.position.applyAxisAngle(camera.up, angle);
+      xrOrigin.position.add(cameraWorldPosition);
+      xrOrigin.rotation.y += angle;
+    }
+
+    function updateXrTeleportMarker(controller: THREE.Group | null) {
+      xrTeleportMarker.visible = false;
+      if (!controller || !loadedObject) return;
+
+      controller.getWorldPosition(xrRayOrigin);
+      controller.getWorldDirection(xrRayDirection);
+      xrRayDirection.multiplyScalar(-1).normalize();
+      xrRaycaster.set(xrRayOrigin, xrRayDirection);
+      xrRaycaster.far = XR_TELEPORT_MAX_DISTANCE;
+      const hits = xrRaycaster.intersectObjects([loadedObject, floor], true);
+      const hit = hits.find((candidate) => {
+        const faceNormal = candidate.face?.normal.clone();
+        if (!faceNormal) return false;
+        faceNormal.transformDirection(candidate.object.matrixWorld);
+        return faceNormal.y > 0.45;
+      });
+      if (!hit) return;
+
+      xrTeleportTarget.copy(hit.point);
+      xrTeleportMarker.position.copy(xrTeleportTarget);
+      xrTeleportMarker.position.y += 0.018;
+      xrTeleportMarker.visible = true;
+
+      const ray = controller.children.find((child) => child.name === "XR pointer ray");
+      if (ray) {
+        ray.scale.z = Math.max(0.4, hit.distance);
+      }
+    }
+
+    function teleportXrUser(target: THREE.Vector3) {
+      camera.getWorldPosition(cameraWorldPosition);
+      xrOrigin.position.x += target.x - cameraWorldPosition.x;
+      xrOrigin.position.z += target.z - cameraWorldPosition.z;
+      if (cameraModeRef.current === "walk") {
+        const targetEyeHeight = getWalkEyeHeight(target.x, target.z, cameraWorldPosition.y);
+        xrOrigin.position.y += targetEyeHeight - cameraWorldPosition.y;
+      }
+      xrVelocity.set(0, 0, 0);
     }
 
     function getWalkEyeHeight(x: number, z: number, fallbackEyeY: number) {
@@ -447,6 +714,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     cleanupRef.current = () => {
       disposed = true;
       renderer.setAnimationLoop(null);
+      renderer.xr.removeEventListener("sessionstart", onXrSessionStart);
+      renderer.xr.removeEventListener("sessionend", onXrSessionEnd);
       window.removeEventListener("resize", resize);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
@@ -482,6 +751,23 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       (grid.material as THREE.Material).dispose();
       backdrop.geometry.dispose();
       (backdrop.material as THREE.Material).dispose();
+      xrTeleportMarker.geometry.dispose();
+      (xrTeleportMarker.material as THREE.Material).dispose();
+      xrControllers.forEach(({ controller, grip, ray }) => {
+        ray.geometry.dispose();
+        (ray.material as THREE.Material).dispose();
+        controller.clear();
+        grip.traverse((child) => {
+          const mesh = child as THREE.Mesh;
+          mesh.geometry?.dispose();
+          if (Array.isArray(mesh.material)) {
+            mesh.material.forEach((material) => material.dispose());
+          } else {
+            mesh.material?.dispose();
+          }
+        });
+        grip.clear();
+      });
       renderer.dispose();
       vrButton?.remove();
       renderer.domElement.remove();
@@ -508,10 +794,18 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         </button>
         <div className={`control-hint ${isPointerLocked ? "control-hint-active" : ""}`}>
           <ScanSearch size={18} aria-hidden="true" />
-          {isPointerLocked
+          {isXrPresenting
+            ? "VR: thumbstick move, snap turn, trigger teleport."
+            : isPointerLocked
             ? `${cameraMode === "free" ? "Free camera" : "Walk mode"}. Esc releases.`
             : cameraMode === "free" ? "Free: WASD, Space/E up, C/Q down, F walk." : "Walk: WASD, Shift run, stairs auto-climb, F free camera."}
         </div>
+        {xrAvailable && (
+          <div className={`xr-chip ${isXrPresenting ? "xr-chip-active" : ""}`}>
+            <View size={18} aria-hidden="true" />
+            {isXrPresenting ? "VR active" : "VR ready"}
+          </div>
+        )}
       </div>
 
       <div className={`viewer-status status-${status}`}>
