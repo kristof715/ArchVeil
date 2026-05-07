@@ -1,4 +1,4 @@
-import { RotateCcw, ScanSearch, TriangleAlert, View } from "lucide-react";
+import { ArrowUpDown, RotateCcw, ScanSearch, TriangleAlert, View } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
@@ -29,8 +29,7 @@ const DEFAULT_MODEL_RADIUS = 12;
 const VERTICAL_SPEED = 2.6;
 const XR_WALK_SPEED = 2.2;
 const XR_FAST_MULTIPLIER = 1.75;
-const XR_TURN_STEP = Math.PI / 8;
-const XR_TURN_DEBOUNCE = 0.32;
+const XR_SMOOTH_TURN_SPEED = 1.8;
 const XR_TELEPORT_MAX_DISTANCE = 24;
 const XR_THUMBSTICK_DEADZONE = 0.18;
 const MAX_STEP_UP = 0.72;
@@ -43,6 +42,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const resetRef = useRef<(() => void) | null>(null);
+  const resetXrHeightRef = useRef<(() => void) | null>(null);
+  const toggleXrCameraModeRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState<ViewerStatus>("loading");
   const [message, setMessage] = useState("Loading IFC model");
   const [xrAvailable, setXrAvailable] = useState(false);
@@ -173,7 +174,6 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     const xrMoveInput = new THREE.Vector3();
     const xrTeleportTarget = new THREE.Vector3();
     const clock = new THREE.Clock();
-    const xrTurnTimers: Record<string, number> = { left: 0, right: 0, none: 0 };
     let loadedObject: THREE.Object3D | null = null;
     let edgeObject: THREE.Object3D | null = null;
     let modelCenter = new THREE.Vector3();
@@ -211,6 +211,9 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         }
         controller.userData.teleportPressed = false;
         xrTeleportMarker.visible = false;
+      });
+      controller.addEventListener("squeezestart", () => {
+        resetXrEyeHeight();
       });
 
       xrOrigin.add(controller, grip);
@@ -261,6 +264,25 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
       lookAtPoint(new THREE.Vector3(modelCenter.x, eyeY, modelCenter.z));
     }
     resetRef.current = resetCamera;
+
+    function resetXrEyeHeight() {
+      camera.getWorldPosition(cameraWorldPosition);
+      const targetEyeHeight = getWalkEyeHeight(cameraWorldPosition.x, cameraWorldPosition.z, cameraWorldPosition.y);
+      xrOrigin.position.y += targetEyeHeight - cameraWorldPosition.y;
+      xrVelocity.set(0, 0, 0);
+    }
+    resetXrHeightRef.current = resetXrEyeHeight;
+
+    function toggleXrCameraMode() {
+      const nextMode = cameraModeRef.current === "walk" ? "free" : "walk";
+      cameraModeRef.current = nextMode;
+      setCameraMode(nextMode);
+      xrVelocity.set(0, 0, 0);
+      if (nextMode === "walk") {
+        resetXrEyeHeight();
+      }
+    }
+    toggleXrCameraModeRef.current = toggleXrCameraMode;
 
     function updateCameraRotation() {
       camera.rotation.order = "YXZ";
@@ -410,7 +432,6 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
           null;
         const gamepad = inputSource?.gamepad;
         const handKey = inputSource?.handedness ?? "none";
-        xrTurnTimers[handKey] = Math.max(0, (xrTurnTimers[handKey] ?? 0) - delta);
 
         if (gamepad) {
           const { x: axisX, y: axisY } = getXrThumbstickAxes(gamepad);
@@ -426,9 +447,13 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
             }
           }
 
-          if (isTurnController && Math.abs(axisX) > 0.82 && Math.abs(axisY) < 0.35 && (xrTurnTimers[handKey] ?? 0) === 0) {
-            rotateXrOriginAroundHeadset(axisX > 0 ? -XR_TURN_STEP : XR_TURN_STEP);
-            xrTurnTimers[handKey] = XR_TURN_DEBOUNCE;
+          if (isTurnController) {
+            if (Math.abs(axisX) > XR_THUMBSTICK_DEADZONE) {
+              rotateXrOriginAroundHeadset(-axisX * XR_SMOOTH_TURN_SPEED * delta);
+            }
+            if (cameraModeRef.current === "free" && Math.abs(axisY) > XR_THUMBSTICK_DEADZONE) {
+              xrMoveInput.y -= axisY;
+            }
           }
 
           fast = fast || gamepad.buttons.some((button, buttonIndex) => buttonIndex > 0 && button.pressed);
@@ -446,12 +471,20 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         xrRight.crossVectors(xrForward, camera.up).normalize();
 
         const targetSpeed = XR_WALK_SPEED * (fast ? XR_FAST_MULTIPLIER : 1);
-        xrVelocity
-          .copy(xrForward)
-          .multiplyScalar(xrMoveInput.z)
-          .addScaledVector(xrRight, xrMoveInput.x)
-          .normalize()
-          .multiplyScalar(targetSpeed);
+        xrVelocity.set(0, 0, 0);
+        if (Math.abs(xrMoveInput.z) > 0) {
+          xrVelocity.addScaledVector(xrForward, xrMoveInput.z);
+        }
+        if (Math.abs(xrMoveInput.x) > 0) {
+          xrVelocity.addScaledVector(xrRight, xrMoveInput.x);
+        }
+        if (cameraModeRef.current === "free" && Math.abs(xrMoveInput.y) > 0) {
+          xrVelocity.y += xrMoveInput.y;
+        }
+        if (xrVelocity.lengthSq() > 1) {
+          xrVelocity.normalize();
+        }
+        xrVelocity.multiplyScalar(targetSpeed);
       } else {
         xrVelocity.set(0, 0, 0);
       }
@@ -776,6 +809,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
     return () => {
       cleanupRef.current?.();
       cleanupRef.current = null;
+      resetXrHeightRef.current = null;
+      toggleXrCameraModeRef.current = null;
     };
   }, [project]);
 
@@ -795,11 +830,25 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         <div className={`control-hint ${isPointerLocked ? "control-hint-active" : ""}`}>
           <ScanSearch size={18} aria-hidden="true" />
           {isXrPresenting
-            ? "VR: thumbstick move, snap turn, trigger teleport."
+            ? cameraMode === "free"
+              ? "VR freecam: left move, right turn/up/down, trigger teleport, grip eye height."
+              : "VR walk: left move, right smooth turn, trigger teleport, grip eye height."
             : isPointerLocked
             ? `${cameraMode === "free" ? "Free camera" : "Walk mode"}. Esc releases.`
             : cameraMode === "free" ? "Free: WASD, Space/E up, C/Q down, F walk." : "Walk: WASD, Shift run, stairs auto-climb, F free camera."}
         </div>
+        {xrAvailable && (
+          <button className="icon-text-button" onClick={() => toggleXrCameraModeRef.current?.()}>
+            <View size={18} aria-hidden="true" />
+            {cameraMode === "free" ? "VR walk" : "VR freecam"}
+          </button>
+        )}
+        {xrAvailable && (
+          <button className="icon-text-button" onClick={() => resetXrHeightRef.current?.()}>
+            <ArrowUpDown size={18} aria-hidden="true" />
+            Eye height
+          </button>
+        )}
         {xrAvailable && (
           <div className={`xr-chip ${isXrPresenting ? "xr-chip-active" : ""}`}>
             <View size={18} aria-hidden="true" />
