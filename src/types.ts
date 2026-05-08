@@ -18,4 +18,5 @@ export type StorageAdapter = {
   mode: "firebase" | "local";
   createProject(file: File, onProgress: (progress: UploadProgress) => void): Promise<ProjectRecord>;
   getProject(projectId: string): Promise<ProjectRecord | null>;
+  listRecentProjects(): Promise<ProjectRecord[]>;
 };

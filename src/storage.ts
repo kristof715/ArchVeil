@@ -122,6 +122,24 @@ const firebaseAdapter: StorageAdapter = {
       createdAt: data.createdAt,
       source: "firebase"
     };
+  },
+  async listRecentProjects() {
+    const [{ collection, getDocs, limit, orderBy, query }] = await Promise.all([import("firebase/firestore")]);
+    const { db } = await getFirebaseServices();
+    const q = query(collection(db, "projects"), orderBy("createdAt", "desc"), limit(5));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map((docSnap) => {
+      const data = docSnap.data() as Omit<ProjectRecord, "id">;
+      return {
+        id: docSnap.id,
+        name: data.name,
+        fileName: data.fileName,
+        fileUrl: data.fileUrl,
+        storagePath: data.storagePath,
+        createdAt: data.createdAt,
+        source: "firebase" as const
+      };
+    });
   }
 };
 
@@ -142,7 +160,10 @@ const localAdapter: StorageAdapter = {
     onProgress({ bytesTransferred: file.size, totalBytes: file.size, percent: 100 });
     return project;
   },
-  getProject: getLocalProject
+  getProject: getLocalProject,
+  async listRecentProjects() {
+    return [];
+  }
 };
 
 export const storageAdapter: StorageAdapter = hasFirebaseConfig ? firebaseAdapter : localAdapter;

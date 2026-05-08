@@ -1,4 +1,4 @@
-import { Check, Copy, FileUp, Home, Link as LinkIcon, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Copy, ExternalLink, FileUp, Home, Link as LinkIcon, Loader2, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ModelViewer } from "./ModelViewer";
 import { storageAdapter } from "./storage";
@@ -59,6 +59,7 @@ function UploadPage() {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const shareUrl = useMemo(() => {
     if (!project) return "";
@@ -82,6 +83,7 @@ function UploadPage() {
       setIsUploading(true);
       const created = await storageAdapter.createProject(file, setProgress);
       setProject(created);
+      setRefreshKey((k) => k + 1);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "The upload failed.");
     } finally {
@@ -157,6 +159,8 @@ function UploadPage() {
         </aside>
       </div>
 
+      <RecentProjects refreshKey={refreshKey} />
+
       {project && (
         <section className="share-panel">
           <div>
@@ -176,6 +180,60 @@ function UploadPage() {
           </div>
         </section>
       )}
+    </section>
+  );
+}
+
+function RecentProjects({ refreshKey }: { refreshKey: number }) {
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (storageAdapter.mode !== "firebase") {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    storageAdapter
+      .listRecentProjects()
+      .then((list) => { if (!cancelled) { setProjects(list); setLoading(false); } })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  if (storageAdapter.mode !== "firebase") return null;
+
+  async function copyLink(project: ProjectRecord) {
+    await navigator.clipboard.writeText(`${window.location.origin}/project/${project.id}`);
+    setCopiedId(project.id);
+    window.setTimeout(() => setCopiedId(null), 1800);
+  }
+
+  if (loading) return null;
+  if (projects.length === 0) return null;
+
+  return (
+    <section className="recent-projects">
+      <h2 className="recent-projects-heading">Recent projects</h2>
+      <ul className="recent-projects-list">
+        {projects.map((project) => (
+          <li key={project.id} className="recent-project-row">
+            <span className="recent-project-name">{project.name}</span>
+            <div className="recent-project-actions">
+              <button className="secondary-button" onClick={() => copyLink(project)}>
+                {copiedId === project.id ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}
+                {copiedId === project.id ? "Copied" : "Copy link"}
+              </button>
+              <button className="primary-button recent-open-button" onClick={() => navigate(`/project/${project.id}`)}>
+                <ExternalLink size={16} aria-hidden="true" />
+                Open viewer
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
