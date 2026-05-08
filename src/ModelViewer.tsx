@@ -602,14 +602,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         }
 
         setMessage("Parsing IFC geometry");
-        const blob = await response.blob();
-        const objectUrl = URL.createObjectURL(blob);
-        let object: THREE.Object3D;
-        try {
-          object = await loader.loadAsync(objectUrl) as THREE.Object3D;
-        } finally {
-          URL.revokeObjectURL(objectUrl);
-        }
+        const buffer = await response.arrayBuffer();
+        const object = await loader.parse(buffer);
 
         if (disposed) return;
         loadedObject = object;
@@ -633,8 +627,13 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         scene.add(demo, edgeObject);
         resetCamera();
         setStatus("error");
-        const detail = loadError instanceof Error ? ` ${loadError.message}` : "";
-        setMessage(`The IFC file could not be parsed here.${detail} A walkthrough preview scene is shown instead.`);
+        const detail = loadError instanceof Error
+          ? loadError.message
+          : typeof loadError === "string"
+            ? loadError
+            : JSON.stringify(loadError);
+        console.error("[ArchVeil] IFC load failed:", detail);
+        setMessage(`IFC parse failed: ${detail}`);
       }
     }
 

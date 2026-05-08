@@ -234,7 +234,7 @@ function ViewerPage({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      {error && (
+      {!loading && error && (
         <div className="center-state">
           <TriangleAlert size={32} aria-hidden="true" />
           <p>{error}</p>
