@@ -602,14 +602,8 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         }
 
         setMessage("Parsing IFC geometry");
-        const blob = await response.blob();
-        const objectUrl = URL.createObjectURL(blob);
-        let object: THREE.Object3D;
-        try {
-          object = await loader.loadAsync(objectUrl) as THREE.Object3D;
-        } finally {
-          URL.revokeObjectURL(objectUrl);
-        }
+        const buffer = await response.arrayBuffer();
+        const object = await loader.parse(buffer);
 
         if (disposed) return;
         loadedObject = object;
