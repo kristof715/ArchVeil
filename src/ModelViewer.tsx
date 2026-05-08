@@ -627,8 +627,13 @@ export function ModelViewer({ project }: { project: ProjectRecord }) {
         scene.add(demo, edgeObject);
         resetCamera();
         setStatus("error");
-        const detail = loadError instanceof Error ? ` ${loadError.message}` : "";
-        setMessage(`The IFC file could not be parsed here.${detail} A walkthrough preview scene is shown instead.`);
+        const detail = loadError instanceof Error
+          ? loadError.message
+          : typeof loadError === "string"
+            ? loadError
+            : JSON.stringify(loadError);
+        console.error("[ArchVeil] IFC load failed:", detail);
+        setMessage(`IFC parse failed: ${detail}`);
       }
     }
 
